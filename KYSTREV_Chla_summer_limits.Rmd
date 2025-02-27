@@ -1,0 +1,112 @@
+---
+title: "KYSTREV_Chla_limits"
+author: "Sandra Gran & Sonja Kistenich"
+date: "2025-02-25"
+output: html_document
+description: "Script to calculate chlorophyll a summer means based on monitoring data from all ecoregions"
+---
+
+```{r, include=FALSE}
+# List of required packages
+packages <- c("xfun", "tidyverse", "readxl", "lubridate", "hms", "terra", "sf", "dplyr", "tidyr")
+
+# Install missing packages
+install_if_missing <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Check and install packages
+lapply(packages, install_if_missing)
+
+# Load libraries
+lapply(packages, library, character.only = TRUE)
+
+Sys.setlocale(locale='no_NB.utf8')
+
+
+```
+#Load dataset
+```{r}
+load("KYSTREV_2024_cleandata_final_v3.RData")
+```
+
+#Select relevant parameters
+```{r}
+nutchla_data = df_final_newsnox %>% 
+  filter(Parameter %in% c("KlfA","NH4","SiO2", "SNOx","TOTN", "PO4", "TOTP", "Temp","Salt")) %>% 
+  dplyr::select(Master_Ecoregion, Master_RegType,Master_station_code, Sample_date, Depth, Parameter,Master_value) %>% 
+  pivot_wider(names_from = Parameter, values_from = Master_value) %>% 
+  mutate(Master_station_code = gsub("Ærøydypet", "Aeroydypet", Master_station_code))
+```
+
+#Set new limits
+```{r}
+chlfa <- nutchla_data %>%
+  filter(!(Master_Ecoregion == "Skagerrak" & year(Sample_date) < 2000)) %>%
+  select(Master_Ecoregion, Master_RegType, Master_station_code, Sample_date, Depth, KlfA) %>% 
+  rename(Chla = KlfA) %>% 
+  mutate(Year = year(Sample_date),
+         Month = month(Sample_date, label = TRUE, abbr = FALSE)) %>%
+  na.omit() %>% 
+  group_by(Master_Ecoregion, Master_RegType, Master_station_code, Sample_date, Year, Month) %>%
+  summarise(Chla = mean(Chla, na.rm = TRUE),
+            count_per_month = n()) %>% 
+  ungroup()
+
+
+# Filter the data for each ecoregion and combine
+filtered_data <- chlfa %>% 
+  filter(Month %in% c("juni", "juli", "august", "september")) %>%
+  group_by(Master_Ecoregion, Master_RegType, Year) %>%
+  filter(n_distinct(Month) >=2) %>%
+  ungroup()
+
+# Calculate the summer average of Chla per ecoregion and regtype
+summer_avg <- filtered_data %>%
+  group_by(Master_Ecoregion, Master_RegType, Year) %>%
+  summarise(summer_avg_Chla = mean(Chla, na.rm = TRUE),
+            count = n()) %>% 
+  ungroup() %>%
+  arrange(Master_RegType)
+
+
+# Calculate the 5th percentile and the required limits
+limits_1 <- summer_avg %>%
+  group_by(Master_Ecoregion, Master_RegType) %>%
+  summarise(
+    fifth_percentile = quantile(summer_avg_Chla, probs = 0.05, na.rm = TRUE),
+    count_n = sum(count)
+  )
+
+limits <- summer_avg %>%
+  group_by(Master_Ecoregion) %>%
+  summarise(
+    fifth_percentile = quantile(summer_avg_Chla, probs = 0.05, na.rm = TRUE),
+    count_n = sum(count)
+  ) %>%
+  bind_rows(limits_1) %>%
+  mutate(
+    lim_SG_G = fifth_percentile * 1.5,
+    lim_G_M = lim_SG_G * 1.5,
+    lim_M_D = lim_G_M * 1.5,
+    lim_D_SD = lim_M_D * 1.5
+  ) 
+
+# Select and rename columns as required
+result_table <- limits %>%
+  select(Master_Ecoregion, Master_RegType, count_n, fifth_percentile, lim_SG_G, lim_G_M, lim_M_D, lim_D_SD) %>%
+  rename(
+    Ecoregion = Master_Ecoregion,
+    RegType = Master_RegType,
+    `5th_Percentile` = fifth_percentile
+  ) %>%
+  arrange(Ecoregion, RegType) %>%
+  mutate(across(4:8, round, 2))
+
+# Print the result table
+print(result_table)
+writexl::write_xlsx(result_table, "KYSTREV_5thperc_New_limits_Chla.xlsx")
+```
+
